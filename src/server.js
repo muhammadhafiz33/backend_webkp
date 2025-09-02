@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
+const path = require('path');
 
 const authRoutes = require('./routes/auth.routes');
 const adminRoutes = require('./routes/admin.routes');
@@ -24,6 +25,7 @@ app.use('/api/jurnals', jurnalRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/absensi', absensiRoutes);
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 // 404
 app.use((req, res) => res.status(404).json({ message: 'Not found' }));

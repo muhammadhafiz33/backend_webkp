@@ -2,7 +2,22 @@ const express = require('express');
 const pool = require('../config/db');
 const { authenticate } = require('../middlewares/auth');
 const multer = require('multer');
-const upload = multer();
+const path = require('path');
+const fs = require('fs');
+
+// Konfigurasi multer untuk upload foto
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadPath = path.join(__dirname, '..', '..', 'uploads');
+    if (!fs.existsSync(uploadPath)) fs.mkdirSync(uploadPath, { recursive: true });
+    cb(null, uploadPath);
+  },
+  filename: function (req, file, cb) {
+    const ext = path.extname(file.originalname);
+    cb(null, `profile_${req.user.id}_${Date.now()}${ext}`);
+  }
+});
+const upload = multer({ storage });
 
 const router = express.Router();
 
@@ -53,10 +68,9 @@ router.get('/me', async (req, res) => {
 });
 
 // PUT /api/profile/me -> Memperbarui profil pengguna yang login (dengan metode UPSERT)
-router.put('/me', upload.none(), async (req, res) => {
+router.put('/me', upload.single('foto'), async (req, res) => {
   try {
     const userId = req.user.id;
-    // Semua field diambil dari req.body (FormData)
     const {
       nama, email, telepon, alamat, universitas, jurusan,
       angkatan, tanggalMulai, tanggalSelesai, pembimbing, divisi
@@ -70,11 +84,18 @@ router.put('/me', upload.none(), async (req, res) => {
       await pool.query('UPDATE users SET email = ? WHERE id = ?', [email, userId]);
     }
 
+    // Handle foto profil
+    let fotoUrl = null;
+    if (req.file) {
+      // Simpan path relatif ke database
+      fotoUrl = `/uploads/${req.file.filename}`;
+    }
+
     await pool.query(
       `INSERT INTO user_profiles (
           user_id, nama_lengkap, telepon, alamat, universitas, jurusan, angkatan,
-          tanggal_mulai_kp, tanggal_selesai_kp, pembimbing_lapangan, divisi
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          tanggal_mulai_kp, tanggal_selesai_kp, pembimbing_lapangan, divisi, foto_profil_url
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
           nama_lengkap = VALUES(nama_lengkap),
           telepon = VALUES(telepon),
@@ -85,7 +106,8 @@ router.put('/me', upload.none(), async (req, res) => {
           tanggal_mulai_kp = VALUES(tanggal_mulai_kp),
           tanggal_selesai_kp = VALUES(tanggal_selesai_kp),
           pembimbing_lapangan = VALUES(pembimbing_lapangan),
-          divisi = VALUES(divisi)
+          divisi = VALUES(divisi),
+          foto_profil_url = IF(VALUES(foto_profil_url) IS NOT NULL, VALUES(foto_profil_url), foto_profil_url)
       `,
       [
         userId,
@@ -98,7 +120,8 @@ router.put('/me', upload.none(), async (req, res) => {
         toNull(tanggalMulai),
         toNull(tanggalSelesai),
         toNull(pembimbing),
-        toNull(divisi)
+        toNull(divisi),
+        fotoUrl
       ]
     );
 
