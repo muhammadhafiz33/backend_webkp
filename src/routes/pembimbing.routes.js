@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
 const { authenticate, authorize } = require('../middlewares/auth');
+const PDFDocument = require('pdfkit');
 
 router.use(authenticate, authorize('PEMBIMBING'));
 
@@ -99,23 +100,211 @@ router.get('/absensi', async (req, res) => {
         
         const namaPembimbing = pembimbingInfo[0].nama_lengkap || pembimbingInfo[0].identifier;
         
+        // Perbaikan: Query digabung untuk mengambil data absensi dan izin
         const query = `
             SELECT 
-                a.id, a.tanggal, a.waktu_masuk, a.status, a.keterangan,
+                a.id, a.tanggal, a.waktu_masuk, a.waktu_keluar, a.status, NULL as alasan,
                 u.identifier AS nim_mahasiswa,
-                up.nama_lengkap AS nama_mahasiswa
+                COALESCE(up.nama_lengkap, u.nama_lengkap) AS nama_mahasiswa
             FROM absensi a
             JOIN users u ON a.user_id = u.id
-            JOIN user_profiles up ON u.id = up.user_id
+            LEFT JOIN user_profiles up ON u.id = up.user_id
             WHERE up.pembimbing_lapangan = ?
-            ORDER BY a.tanggal DESC
+            UNION ALL
+            SELECT 
+                i.id, i.tanggal_izin as tanggal, NULL as waktu_masuk, NULL as waktu_keluar, 'IZIN' as status, i.alasan,
+                u.identifier AS nim_mahasiswa,
+                COALESCE(up.nama_lengkap, u.nama_lengkap) AS nama_mahasiswa
+            FROM izin i
+            JOIN users u ON i.user_id = u.id
+            LEFT JOIN user_profiles up ON u.id = up.user_id
+            WHERE up.pembimbing_lapangan = ?
+            ORDER BY tanggal DESC
         `;
-        const [absensi] = await pool.query(query, [namaPembimbing]);
+        const [absensi] = await pool.query(query, [namaPembimbing, namaPembimbing]);
 
         res.json(absensi);
     } catch (error) {
         console.error('Error fetching absensi for pembimbing:', error);
         res.status(500).json({ message: 'Internal Server Error' });
+    }
+});
+
+/**
+ * Endpoint untuk mengekspor laporan absensi pembimbing ke PDF
+ */
+router.get('/absensi/export/pdf', async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const [pembimbingInfo] = await pool.query(
+            `SELECT COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama_lengkap
+             FROM users u LEFT JOIN user_profiles p ON u.id = p.user_id
+             WHERE u.id = ? AND u.role = 'PEMBIMBING'`,
+            [userId]
+        );
+
+        if (!pembimbingInfo.length) {
+            return res.status(404).json({ message: 'Pembimbing not found' });
+        }
+        
+        const namaPembimbing = pembimbingInfo[0].nama_lengkap;
+        
+        const query = `
+            SELECT 
+                u.identifier AS nim_mahasiswa,
+                COALESCE(up.nama_lengkap, u.nama_lengkap) AS nama_mahasiswa,
+                a.tanggal, a.waktu_masuk, a.waktu_keluar, a.status
+            FROM absensi a
+            JOIN users u ON a.user_id = u.id
+            LEFT JOIN user_profiles up ON u.id = up.user_id
+            WHERE up.pembimbing_lapangan = ?
+            ORDER BY a.tanggal DESC
+        `;
+        const [rows] = await pool.query(query, [namaPembimbing]);
+
+        if (!rows.length) {
+            const doc = new PDFDocument({ margin: 30, size: 'A4' });
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename=laporan-absensi-bimbingan.pdf`);
+            doc.pipe(res);
+            doc.fontSize(16).text('Laporan Absensi Mahasiswa Bimbingan', { align: 'center' }).moveDown();
+            doc.fontSize(12).text('Tidak ada data absensi untuk mahasiswa bimbingan.', { align: 'center' }).moveDown();
+            doc.end();
+            return;
+        }
+
+        const doc = new PDFDocument({ margin: 30, size: 'A4' });
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename=laporan-absensi-bimbingan.pdf`);
+        doc.pipe(res);
+
+        doc.fontSize(16).text('Laporan Absensi Mahasiswa Bimbingan', { align: 'center' }).moveDown();
+        doc.fontSize(12).text(`Pembimbing: ${namaPembimbing}`).moveDown();
+
+        const headers = ['NIM', 'Nama', 'Tanggal', 'Masuk', 'Keluar', 'Status'];
+        const columnPositions = [30, 100, 230, 320, 400, 500];
+        const columnWidths = [70, 130, 90, 80, 80, 60];
+        let tableTop = 150;
+
+        doc.fontSize(10).font('Helvetica-Bold');
+        headers.forEach((header, i) => doc.text(header, columnPositions[i], tableTop, { width: columnWidths[i] }));
+        doc.moveTo(30, tableTop + 15).lineTo(565, tableTop + 15).stroke();
+        doc.font('Helvetica');
+
+        let y = tableTop + 20;
+        for (const row of rows) {
+            if (y > 750) {
+                doc.addPage();
+                y = 50;
+            }
+
+            const cells = [
+                row.nim_mahasiswa || '-',
+                row.nama_mahasiswa || '-',
+                new Date(row.tanggal).toLocaleDateString('id-ID') || '-',
+                row.waktu_masuk || '-',
+                row.waktu_keluar || '-',
+                row.status || '-'
+            ];
+
+            cells.forEach((cell, i) => doc.text(cell, columnPositions[i], y, { width: columnWidths[i] }));
+            y += 20;
+        }
+
+        doc.end();
+    } catch (error) {
+        console.error('Error generating PDF report for pembimbing:', error);
+        res.status(500).json({ message: 'Error generating PDF report' });
+    }
+});
+
+
+/**
+ * Endpoint BARU untuk mengekspor laporan jurnal pembimbing ke PDF
+ */
+router.get('/jurnals/export/pdf', async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const [pembimbingInfo] = await pool.query(
+            `SELECT COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama_lengkap
+             FROM users u LEFT JOIN user_profiles p ON u.id = p.user_id
+             WHERE u.id = ? AND u.role = 'PEMBIMBING'`,
+            [userId]
+        );
+
+        if (!pembimbingInfo.length) {
+            return res.status(404).json({ message: 'Pembimbing not found' });
+        }
+        
+        const namaPembimbing = pembimbingInfo[0].nama_lengkap;
+        
+        const query = `
+            SELECT 
+                j.id,
+                u.identifier AS nim, 
+                COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama,
+                j.tanggal, 
+                j.kegiatan, 
+                j.deskripsi,
+                j.jam_kerja,
+                j.hambatan,
+                j.rencana_selanjutnya,
+                j.status,
+                j.komentar_admin
+            FROM jurnals j
+            JOIN users u ON j.user_id = u.id
+            LEFT JOIN user_profiles p ON u.id = p.user_id
+            WHERE COALESCE(p.pembimbing_lapangan, '') = ?
+            ORDER BY j.tanggal DESC
+        `;
+        
+        const [rows] = await pool.query(query, [namaPembimbing]);
+
+        if (!rows.length) {
+            const doc = new PDFDocument({ margin: 30, size: 'A4' });
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename=laporan-jurnal-bimbingan.pdf`);
+            doc.pipe(res);
+            doc.fontSize(16).text('Laporan Jurnal Mahasiswa Bimbingan', { align: 'center' }).moveDown();
+            doc.fontSize(12).text('Tidak ada data jurnal untuk mahasiswa bimbingan.', { align: 'center' }).moveDown();
+            doc.end();
+            return;
+        }
+
+        const doc = new PDFDocument({ margin: 30, size: 'A4' });
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename=laporan-jurnal-bimbingan.pdf`);
+        doc.pipe(res);
+        
+        doc.fontSize(16).text('Laporan Jurnal Mahasiswa Bimbingan', { align: 'center' }).moveDown();
+        doc.fontSize(12).text(`Pembimbing: ${namaPembimbing}`).moveDown();
+        
+        rows.forEach((jurnal) => {
+            const formattedDate = new Date(jurnal.tanggal).toLocaleDateString('id-ID', { dateStyle: 'full' });
+            
+            doc.fontSize(12).font('Helvetica-Bold').text(`Jurnal Tanggal: ${formattedDate}`, { underline: true }).moveDown(0.5);
+            doc.font('Helvetica-Bold').text('Mahasiswa:', { continued: true }).font('Helvetica').text(` ${jurnal.nama} (${jurnal.nim})`);
+            doc.font('Helvetica-Bold').text('Status:', { continued: true }).font('Helvetica').text(` ${jurnal.status}`);
+            doc.font('Helvetica-Bold').text('Kegiatan:').font('Helvetica').text(jurnal.kegiatan);
+            doc.font('Helvetica-Bold').text('Deskripsi:').font('Helvetica').text(jurnal.deskripsi);
+            if (jurnal.hambatan) {
+                doc.font('Helvetica-Bold').text('Hambatan:').font('Helvetica').text(jurnal.hambatan);
+            }
+            if (jurnal.komentar_admin) {
+                doc.font('Helvetica-Bold').text('Komentar Pembimbing:').font('Helvetica').text(jurnal.komentar_admin);
+            }
+            doc.moveDown();
+            
+            // Tambahkan halaman baru jika konten terlalu panjang
+            if (doc.y > 700) {
+                doc.addPage();
+            }
+        });
+
+        doc.end();
+    } catch (error) {
+        console.error('Error generating PDF report for journals:', error);
+        res.status(500).json({ message: 'Error generating PDF report' });
     }
 });
 

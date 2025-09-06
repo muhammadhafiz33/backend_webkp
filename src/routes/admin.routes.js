@@ -432,7 +432,18 @@ router.get('/absensi/export', async (req, res) => {
     const [rows] = await pool.query(query, [tanggal]);
 
     if (!rows.length) {
-      return res.status(404).json({ message: 'No attendance data found' });
+      // Tidak mengembalikan error jika tidak ada data, tapi membuat PDF kosong
+      const doc = new PDFDocument({ margin: 30, size: 'A4' });
+      const formattedDate = new Date(tanggal).toLocaleDateString('id-ID', { dateStyle: 'full' });
+      
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename=laporan-absensi-${tanggal}.pdf`);
+      doc.pipe(res);
+
+      doc.fontSize(16).text(`Laporan Absensi - ${formattedDate}`, { align: 'center' }).moveDown();
+      doc.fontSize(12).text('Tidak ada data absensi untuk tanggal ini.', { align: 'center' }).moveDown();
+      doc.end();
+      return;
     }
 
     // Generate PDF
@@ -495,6 +506,96 @@ router.get('/absensi/export', async (req, res) => {
     handleError(res, error, 'Error generating attendance PDF report');
   }
 });
+
+// GET /api/admin/izin/history -> Mendapatkan semua riwayat pengajuan izin
+router.get('/izin/history', async (req, res) => {
+    try {
+      const [izinHistory] = await pool.query(
+        'SELECT i.*, u.identifier AS nim, u.email FROM izin i JOIN users u ON i.user_id = u.id ORDER BY i.tanggal_izin DESC'
+      );
+      res.json(izinHistory);
+    } catch (error) {
+      handleError(res, error, 'Error fetching all izin history');
+    }
+});
+
+/**
+ * Endpoint untuk mengekspor riwayat izin ke PDF
+ */
+router.get('/izin/export/pdf', async (req, res) => {
+    try {
+        const query = `
+            SELECT 
+                u.identifier AS nim, 
+                COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama,
+                i.alasan,
+                DATE_FORMAT(i.tanggal_izin, '%d-%m-%Y') AS tanggal_izin,
+                i.status
+            FROM izin i
+            JOIN users u ON i.user_id = u.id
+            LEFT JOIN user_profiles p ON u.id = p.user_id
+            ORDER BY i.tanggal_izin DESC
+        `;
+        
+        const [rows] = await pool.query(query);
+
+        if (!rows.length) {
+            return res.status(404).json({ message: 'No leave request data found' });
+        }
+
+        const doc = new PDFDocument({ margin: 30, size: 'A4' });
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename=laporan-izin-mahasiswa.pdf`);
+        doc.pipe(res);
+
+        doc.fontSize(16).text('Laporan Riwayat Pengajuan Izin', { align: 'center' }).moveDown();
+
+        const headers = ['NIM', 'Nama', 'Tanggal Izin', 'Alasan', 'Status'];
+        const columnPositions = [30, 110, 230, 320, 500];
+        const columnWidths = [80, 120, 90, 170, 60];
+        const tableTop = 100;
+
+        doc.fontSize(10).font('Helvetica-Bold');
+        headers.forEach((header, i) => {
+            doc.text(header, columnPositions[i], tableTop);
+        });
+        
+        doc.moveTo(30, tableTop + 15).lineTo(565, tableTop + 15).stroke();
+        
+        doc.font('Helvetica');
+
+        let y = tableTop + 20;
+        for (const row of rows) {
+            const cells = [
+                row.nim || '-',
+                row.nama || '-',
+                row.tanggal_izin || '-', 
+                row.alasan || '-',
+                row.status || '-'
+            ];
+
+            cells.forEach((cell, i) => {
+                doc.text(cell, columnPositions[i], y, { width: columnWidths[i] });
+            });
+
+            const rowHeight = Math.max(
+                doc.heightOfString(row.alasan || '-', { width: columnWidths[3] }), 
+                20
+            );
+            y += rowHeight + 10;
+
+            if (y > 750) {
+                doc.addPage();
+                y = tableTop;
+            }
+        }
+
+        doc.end();
+    } catch (error) {
+        handleError(res, error, 'Error generating leave PDF report');
+    }
+});
+
 
 /** === PEMBIMBING MANAGEMENT === */
 
