@@ -2,26 +2,194 @@ const express = require('express');
 const pool = require('../config/db');
 const { authenticate, authorize } = require('../middlewares/auth');
 const PDFDocument = require('pdfkit');
+const bcrypt = require('bcryptjs');
 
 const router = express.Router();
 
-// Middleware: Only admin can access these routes
-router.use(authenticate, authorize('ADMIN'));
+// Helper functions
+const handleError = (res, error, message = 'Server error', statusCode = 500) => {
+  console.error(error);
+  res.status(statusCode).json({ message });
+};
+
+const validateRequiredFields = (fields, data) => {
+  const missing = fields.filter(field => !data[field]);
+  return missing.length ? `Required fields missing: ${missing.join(', ')}` : null;
+};
+
+// ======================================================
+// RUTE UNTUK MAHASISWA
+// Rute di bawah ini hanya memerlukan autentikasi token
+// ======================================================
+router.use(authenticate);
+
+// Endpoint status absensi hari ini
+router.get('/status', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const today = new Date().toISOString().slice(0, 10);
+    const [absensi] = await pool.query(
+      'SELECT id, tanggal, waktu_masuk, waktu_keluar, status FROM absensi WHERE user_id = ? AND tanggal = ?',
+      [userId, today]
+    );
+
+    if (absensi.length > 0) {
+      return res.json({
+        status: 'checked_in',
+        data: absensi[0],
+      });
+    }
+
+    const [izin] = await pool.query(
+      'SELECT id, tanggal_izin, alasan FROM izin WHERE user_id = ? AND tanggal_izin = ?',
+      [userId, today]
+    );
+
+    if (izin.length > 0) {
+      return res.json({
+        status: 'izin',
+        data: izin[0],
+      });
+    }
+
+    res.json({
+      status: 'not_checked_in',
+      data: null,
+    });
+  } catch (error) {
+    handleError(res, error, 'Error fetching status');
+  }
+});
+
+// Endpoint riwayat absensi 5 hari terakhir
+router.get('/history', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const [history] = await pool.query(
+      'SELECT id, tanggal, waktu_masuk, waktu_keluar, status FROM absensi WHERE user_id = ? ORDER BY tanggal DESC LIMIT 5',
+      [userId]
+    );
+    res.json(history);
+  } catch (error) {
+    handleError(res, error, 'Error fetching history');
+  }
+});
+
+// Endpoint riwayat pengajuan izin 5 hari terakhir
+router.get('/izin/history', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const [izinHistory] = await pool.query(
+      'SELECT id, tanggal_izin, alasan FROM izin WHERE user_id = ? ORDER BY tanggal_izin DESC LIMIT 5',
+      [userId]
+    );
+    res.json(izinHistory);
+  } catch (error) {
+    handleError(res, error, 'Error fetching izin history');
+  }
+});
+
+// Endpoint untuk Check-in
+router.post('/check-in', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const today = new Date().toISOString().slice(0, 10);
+    const checkInTime = new Date().toLocaleTimeString('id-ID', { hour12: false });
+    const status = checkInTime > '08:30:00' ? 'TERLAMBAT' : 'HADIR';
+
+    // Cek apakah user sudah check-in atau mengajukan izin hari ini
+    const [existingAbsensi] = await pool.query(
+      "SELECT id FROM absensi WHERE user_id = ? AND tanggal = ?",
+      [userId, today]
+    );
+    if (existingAbsensi.length > 0) {
+        return res.status(409).json({ message: "Anda sudah check-in hari ini." });
+    }
+
+    const [existingIzin] = await pool.query(
+      "SELECT id FROM izin WHERE user_id = ? AND tanggal_izin = ?",
+      [userId, today]
+    );
+    if (existingIzin.length > 0) {
+        return res.status(409).json({ message: "Anda tidak dapat check-in karena sudah mengajukan izin hari ini." });
+    }
+    
+    await pool.query(
+      'INSERT INTO absensi (user_id, tanggal, waktu_masuk, status) VALUES (?, ?, ?, ?)',
+      [userId, today, checkInTime, status]
+    );
+
+    res.status(201).json({ message: 'Check-in berhasil' });
+  } catch (error) {
+    handleError(res, error, 'Error during check-in');
+  }
+});
+
+// Endpoint untuk Check-out
+router.patch('/check-out', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const today = new Date().toISOString().slice(0, 10);
+    const checkOutTime = new Date().toLocaleTimeString('id-ID', { hour12: false });
+
+    await pool.query(
+      'UPDATE absensi SET waktu_keluar = ? WHERE user_id = ? AND tanggal = ?',
+      [checkOutTime, userId, today]
+    );
+
+    res.json({ message: 'Check-out berhasil' });
+  } catch (error) {
+    handleError(res, error, 'Error during check-out');
+  }
+});
+
+// Endpoint untuk Pengajuan Izin
+router.post('/izin', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { tanggal_izin, alasan } = req.body;
+
+    if (!tanggal_izin || !alasan) {
+      return res.status(400).json({ message: 'Tanggal dan alasan izin harus diisi.' });
+    }
+    
+    // Cek apakah user sudah check-in atau mengajukan izin di tanggal tersebut
+    const [existingAbsensi] = await pool.query(
+      "SELECT id FROM absensi WHERE user_id = ? AND tanggal = ?",
+      [userId, tanggal_izin]
+    );
+    if (existingAbsensi.length > 0) {
+      return res.status(409).json({ message: "Anda sudah check-in di tanggal ini, tidak bisa mengajukan izin." });
+    }
+
+    const [existingIzin] = await pool.query(
+      "SELECT id FROM izin WHERE user_id = ? AND tanggal_izin = ?",
+      [userId, tanggal_izin]
+    );
+    if (existingIzin.length > 0) {
+      return res.status(409).json({ message: "Anda sudah mengajukan izin di tanggal ini." });
+    }
+
+    await pool.query(
+      'INSERT INTO izin (user_id, tanggal_izin, alasan) VALUES (?, ?, ?)',
+      [userId, tanggal_izin, alasan]
+    );
+
+    res.status(201).json({ message: 'Pengajuan izin berhasil' });
+  } catch (error) {
+    handleError(res, error, 'Error submitting izin');
+  }
+});
+
+// ======================================================
+// RUTE UNTUK ADMIN
+// Rute di bawah ini dilindungi dengan otorisasi ADMIN
+// ======================================================
+router.use(authorize('ADMIN'));
 
 // Constants
 const VALID_ROLES = ['MAHASISWA', 'ADMIN'];
 const VALID_JURNAL_STATUSES = ['APPROVED', 'REJECTED'];
-
-// Helper functions
-const handleError = (res, error, message = 'Server error', statusCode = 500) => {
-    console.error(error);
-    res.status(statusCode).json({ message });
-};
-
-const validateRequiredFields = (fields, data) => {
-    const missing = fields.filter(field => !data[field]);
-    return missing.length ? `Required fields missing: ${missing.join(', ')}` : null;
-};
 
 /** === USER MANAGEMENT === */
 
@@ -279,7 +447,7 @@ router.get('/jurnals/export', async (req, res) => {
     }
 });
 
-/** === ATTENDANCE MANAGEMENT === */
+/** === ATTENDANCE MANAGEMENT (ADMIN) === */
 
 // Get attendance by date
 router.get('/absensi', async (req, res) => {
@@ -408,115 +576,6 @@ router.get('/absensi/export', async (req, res) => {
         doc.end();
     } catch (error) {
         handleError(res, error, 'Error generating attendance PDF report');
-    }
-});
-
-// RUTE BARU UNTUK EXPORT PDF IZIN
-router.get('/izin/export/pdf', async (req, res) => {
-    try {
-        const [izinData] = await pool.query(
-            `SELECT izin.*, users.identifier AS nim, users.email, COALESCE(users_profile.nama_lengkap, users.nama_lengkap) as nama_lengkap, izin.status AS status_izin
-             FROM izin 
-             JOIN users ON izin.user_id = users.id
-             LEFT JOIN user_profiles ON users.id = user_profiles.user_id
-             ORDER BY izin.created_at DESC`
-        );
-        
-        if (izinData.length === 0) {
-            return res.status(404).json({ message: 'Tidak ada data izin untuk diekspor.' });
-        }
-
-        const doc = new PDFDocument({
-            size: 'A4',
-            margin: 30
-        });
-        
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', 'attachment; filename="riwayat_izin_mahasiswa.pdf"');
-        doc.pipe(res);
-
-        // --- Header Dokumen ---
-        doc.fontSize(20).text('Laporan Pengajuan Izin', { align: 'center' }).moveDown(1);
-        
-        // --- Setup Tabel ---
-        const table = {
-            headers: ['No.', 'Tanggal', 'Nama Karyawan', 'Keperluan', 'Jam Keluar', 'Jam Kembali', 'Tanda Tangan'],
-            widths: [20, 60, 100, 140, 50, 50, 60],
-            positions: [30, 55, 120, 225, 370, 425, 485],
-            startY: doc.y,
-        };
-        const tableRight = table.positions[0] + table.widths.reduce((sum, w) => sum + w, 0);
-
-        const drawHeaders = (doc) => {
-            doc.font('Helvetica-Bold').fontSize(8);
-            let currentX = table.positions[0];
-            table.headers.forEach((header, i) => {
-                doc.text(header, currentX, doc.y, { width: table.widths[i], align: 'center' });
-                currentX += table.widths[i] + 5;
-            });
-            doc.moveDown(0.5);
-            doc.font('Helvetica');
-            doc.moveTo(table.positions[0], doc.y).lineTo(tableRight, doc.y).stroke();
-            doc.moveDown(0.2);
-        };
-
-        drawHeaders(doc);
-        let currentY = doc.y;
-
-        izinData.forEach((item, index) => {
-            const rowStart = currentY;
-
-            // Mengukur tinggi teks terpanjang dalam baris
-            const textKeperluan = item.alasan || '-';
-            const keperluanHeight = doc.heightOfString(textKeperluan, { width: table.widths[3] });
-            const rowHeight = Math.max(20, keperluanHeight + 10);
-
-            // Menambah halaman baru jika baris berikutnya tidak muat
-            if (currentY + rowHeight > doc.page.height - 50) {
-                doc.addPage();
-                doc.y = table.startY;
-                drawHeaders(doc);
-                currentY = doc.y;
-            }
-
-            // Menggambar data baris
-            doc.font('Helvetica').fontSize(8);
-            doc.text(`${index + 1}`, table.positions[0], currentY + 5, { width: table.widths[0], align: 'center' });
-            doc.text(new Date(item.tanggal_izin).toLocaleDateString('id-ID'), table.positions[1], currentY + 5, { width: table.widths[1], align: 'left' });
-            doc.text(item.nama_lengkap || '-', table.positions[2], currentY + 5, { width: table.widths[2], align: 'left' });
-            doc.text(textKeperluan, table.positions[3], currentY + 5, { width: table.widths[3], align: 'left' });
-            doc.text('08:00', table.positions[4], currentY + 5, { width: table.widths[4], align: 'center' }); // Data placeholder
-            doc.text('17:00', table.positions[5], currentY + 5, { width: table.widths[5], align: 'center' }); // Data placeholder
-            doc.text('', table.positions[6], currentY + 5, { width: table.widths[6], align: 'center' }); // Placeholder untuk tanda tangan
-
-            // Menggambar garis horizontal di bawah baris
-            doc.moveTo(table.positions[0], currentY + rowHeight).lineTo(tableRight, currentY + rowHeight).stroke();
-            
-            // Menggambar garis vertikal untuk setiap kolom
-            let lineX = table.positions[0];
-            doc.moveTo(lineX, currentY).lineTo(lineX, currentY + rowHeight).stroke();
-            lineX += table.widths[0];
-            doc.moveTo(lineX, currentY).lineTo(lineX, currentY + rowHeight).stroke();
-            lineX += table.widths[1];
-            doc.moveTo(lineX, currentY).lineTo(lineX, currentY + rowHeight).stroke();
-            lineX += table.widths[2];
-            doc.moveTo(lineX, currentY).lineTo(lineX, currentY + rowHeight).stroke();
-            lineX += table.widths[3];
-            doc.moveTo(lineX, currentY).lineTo(lineX, currentY + rowHeight).stroke();
-            lineX += table.widths[4];
-            doc.moveTo(lineX, currentY).lineTo(lineX, currentY + rowHeight).stroke();
-            lineX += table.widths[5];
-            doc.moveTo(lineX, currentY).lineTo(lineX, currentY + rowHeight).stroke();
-            lineX += table.widths[6];
-            doc.moveTo(lineX, currentY).lineTo(lineX, currentY + rowHeight).stroke();
-
-            currentY += rowHeight;
-        });
-
-        doc.end();
-
-    } catch (error) {
-        handleError(res, error, 'Error saat ekspor PDF riwayat izin:', error);
     }
 });
 

@@ -10,6 +10,7 @@ const jurnalRoutes = require('./routes/jurnal.routes');
 const profileRoutes = require('./routes/profile.routes');
 const dashboardRoutes = require('./routes/dashboard.routes');
 const absensiRoutes = require('./routes/absensi.routes');
+const pembimbingRoutes = require('./routes/pembimbing.routes');
 
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
@@ -25,6 +26,7 @@ app.use('/api/jurnals', jurnalRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/absensi', absensiRoutes);
+app.use('/api/pembimbing', pembimbingRoutes);
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 // 404

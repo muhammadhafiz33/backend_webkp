@@ -78,4 +78,68 @@ router.get('/admin', async (req, res) => {
     }
 });
 
+// GET /api/dashboard/pembimbing -> Mendapatkan data rangkuman untuk dashboard pembimbing
+router.get('/pembimbing', async (req, res) => {
+    try {
+        const userId = req.user.id;
+
+        // Ambil nama lengkap pembimbing yang sedang login
+        const [pembimbingUser] = await pool.query(
+            'SELECT nama_lengkap FROM users WHERE id = ?',
+            [userId]
+        );
+
+        if (pembimbingUser.length === 0) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        const namaPembimbing = pembimbingUser[0].nama_lengkap;
+
+        // 1. Total Mahasiswa Bimbingan
+        const [mahasiswaCount] = await pool.query(
+            "SELECT COUNT(*) as total FROM user_profiles WHERE pembimbing_lapangan = ?",
+            [namaPembimbing]
+        );
+
+        // 2. Jurnal Pending
+        const [pendingCount] = await pool.query(
+            `SELECT COUNT(*) as total FROM jurnals j
+             JOIN user_profiles p ON j.user_id = p.user_id
+             WHERE p.pembimbing_lapangan = ? AND j.status = 'PENDING'`,
+            [namaPembimbing]
+        );
+
+        // 3. Jurnal Disetujui
+        const [approvedCount] = await pool.query(
+            `SELECT COUNT(*) as total FROM jurnals j
+             JOIN user_profiles p ON j.user_id = p.user_id
+             WHERE p.pembimbing_lapangan = ? AND j.status = 'APPROVED'`,
+            [namaPembimbing]
+        );
+        
+        // 4. Jurnal terbaru yang pending dari mahasiswa bimbingan
+        const [pendingJurnals] = await pool.query(
+            `SELECT 
+                j.id, j.tanggal, j.kegiatan, u.identifier as nim, p.nama_lengkap 
+             FROM jurnals j 
+             JOIN user_profiles p ON j.user_id = p.user_id
+             JOIN users u ON j.user_id = u.id
+             WHERE p.pembimbing_lapangan = ? AND j.status = 'PENDING' 
+             ORDER BY j.tanggal DESC, j.created_at DESC LIMIT 5`,
+            [namaPembimbing]
+        );
+
+        const stats = {
+            totalMahasiswaBimbingan: mahasiswaCount[0].total || 0,
+            jurnalPending: pendingCount[0].total || 0,
+            jurnalsApproved: approvedCount[0].total || 0,
+        };
+
+        res.json({ stats, pendingJurnals });
+
+    } catch (err) {
+        console.error('Error fetching pembimbing dashboard data:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
 module.exports = router;
