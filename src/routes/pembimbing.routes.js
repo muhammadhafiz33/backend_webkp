@@ -320,4 +320,94 @@ router.get('/jurnals/export/pdf', async (req, res) => {
     }
 });
 
+/**
+ * Endpoint BARU untuk mengekspor laporan izin pembimbing ke PDF
+ */
+router.get('/izin/export/pdf', async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const [pembimbingInfo] = await pool.query(
+            `SELECT COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama_lengkap
+             FROM users u LEFT JOIN user_profiles p ON u.id = p.user_id
+             WHERE u.id = ? AND u.role = 'PEMBIMBING'`,
+            [userId]
+        );
+
+        if (!pembimbingInfo.length) {
+            return res.status(404).json({ message: 'Pembimbing not found' });
+        }
+        
+        const namaPembimbing = pembimbingInfo[0].nama_lengkap;
+        
+        const query = `
+            SELECT 
+                u.identifier AS nim, 
+                COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama,
+                i.alasan,
+                DATE_FORMAT(i.tanggal_izin, '%d-%m-%Y') AS tanggal_izin,
+                i.status
+            FROM izin i
+            JOIN users u ON i.user_id = u.id
+            LEFT JOIN user_profiles p ON u.id = p.user_id
+            WHERE p.pembimbing_lapangan = ?
+            ORDER BY i.tanggal_izin DESC
+        `;
+        
+        const [rows] = await pool.query(query, [namaPembimbing]);
+
+        if (!rows.length) {
+            const doc = new PDFDocument({ margin: 30, size: 'A4' });
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename=laporan-izin-bimbingan.pdf`);
+            doc.pipe(res);
+            doc.fontSize(16).text('Laporan Riwayat Pengajuan Izin', { align: 'center' }).moveDown();
+            doc.fontSize(12).text('Tidak ada data izin untuk mahasiswa bimbingan.', { align: 'center' }).moveDown();
+            doc.end();
+            return;
+        }
+
+        const doc = new PDFDocument({ margin: 30, size: 'A4' });
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename=laporan-izin-bimbingan.pdf`);
+        doc.pipe(res);
+        
+        doc.fontSize(16).text('Laporan Riwayat Pengajuan Izin', { align: 'center' }).moveDown();
+        doc.fontSize(12).text(`Pembimbing: ${namaPembimbing}`).moveDown();
+        
+        const headers = ['NIM', 'Nama', 'Tanggal Izin', 'Alasan', 'Status'];
+        const columnPositions = [30, 110, 230, 320, 500];
+        const columnWidths = [80, 120, 90, 170, 60];
+        let tableTop = 150;
+
+        doc.fontSize(10).font('Helvetica-Bold');
+        headers.forEach((header, i) => doc.text(header, columnPositions[i], tableTop, { width: columnWidths[i] }));
+        doc.moveTo(30, tableTop + 15).lineTo(565, tableTop + 15).stroke();
+        doc.font('Helvetica');
+
+        let y = tableTop + 20;
+        for (const row of rows) {
+            if (y > 750) {
+                doc.addPage();
+                y = 50;
+            }
+
+            const cells = [
+                row.nim || '-',
+                row.nama || '-',
+                row.tanggal_izin || '-', 
+                row.alasan || '-',
+                row.status || '-'
+            ];
+
+            cells.forEach((cell, i) => doc.text(cell, columnPositions[i], y, { width: columnWidths[i] }));
+            y += 20;
+        }
+
+        doc.end();
+    } catch (error) {
+        console.error('Error generating PDF report for leave requests:', error);
+        res.status(500).json({ message: 'Error generating PDF report' });
+    }
+});
+
 module.exports = router;

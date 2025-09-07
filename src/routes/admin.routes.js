@@ -642,6 +642,8 @@ router.get('/izin/export/pdf', async (req, res) => {
 });
 
 
+
+
 /** === PEMBIMBING MANAGEMENT === */
 
 // GET /api/admin/pembimbing/summary -> Dapatkan daftar pembimbing dengan statistik ringkas
@@ -755,6 +757,97 @@ router.delete('/pembimbing/:id', async (req, res) => {
     res.json({ message: 'Pembimbing deleted successfully' });
   } catch (error) {
     handleError(res, error, 'Error deleting pembimbing');
+  }
+});
+
+
+// GET /api/admin/pembimbing/:id/details -> Mendapatkan detail pembimbing, daftar mahasiswa bimbingan, dan jurnal mereka
+router.get('/pembimbing/:id/details', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 1. Dapatkan info dasar pembimbing
+    const [pembimbingInfoRows] = await pool.query(
+      `SELECT
+        u.id, u.identifier, u.email,
+        COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama_lengkap,
+        p.telepon, p.divisi, p.jabatan
+      FROM users u
+      LEFT JOIN user_profiles p ON u.id = p.user_id
+      WHERE u.id = ? AND u.role = 'PEMBIMBING'`,
+      [id]
+    );
+
+    if (pembimbingInfoRows.length === 0) {
+      return res.status(404).json({ message: 'Pembimbing not found' });
+    }
+    const pembimbingInfo = pembimbingInfoRows[0];
+    const namaPembimbing = pembimbingInfo.nama_lengkap || pembimbingInfo.identifier;
+
+    // 2. Dapatkan daftar mahasiswa bimbingan
+    const [mahasiswaList] = await pool.query(
+      `SELECT
+        u.id, u.identifier AS nim, COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama_lengkap
+      FROM user_profiles p
+      JOIN users u ON p.user_id = u.id
+      WHERE p.pembimbing_lapangan = ?`,
+      [namaPembimbing]
+    );
+
+    // 3. Dapatkan daftar jurnal dari semua mahasiswa bimbingan
+    const [jurnalList] = await pool.query(
+      `SELECT
+        j.id, j.tanggal, j.kegiatan, j.status,
+        u.identifier AS nim, COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama_lengkap
+      FROM jurnals j
+      JOIN users u ON j.user_id = u.id
+      LEFT JOIN user_profiles p ON u.id = p.user_id
+      WHERE p.pembimbing_lapangan = ?
+      ORDER BY j.tanggal DESC`,
+      [namaPembimbing]
+    );
+
+    res.json({
+      pembimbingInfo,
+      mahasiswaList,
+      jurnalList,
+    });
+  } catch (error) {
+    console.error('Error fetching pembimbing details:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// PUT /api/admin/pembimbing/:id -> Memperbarui data pembimbing
+router.put('/pembimbing/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nama_lengkap, identifier, email, telepon, divisi } = req.body;
+
+    const [user] = await pool.query('SELECT id FROM users WHERE id = ? AND role = ?', [id, 'PEMBIMBING']);
+    if (user.length === 0) {
+      return res.status(404).json({ message: 'Pembimbing not found' });
+    }
+
+    // Perbarui data di tabel users
+    await pool.query(
+      'UPDATE users SET identifier = ?, email = ?, nama_lengkap = ? WHERE id = ?',
+      [identifier, email, nama_lengkap, id]
+    );
+
+    // Perbarui data di tabel user_profiles (upsert)
+    await pool.query(
+      `INSERT INTO user_profiles (user_id, nama_lengkap, telepon, divisi) VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+       nama_lengkap = VALUES(nama_lengkap),
+       telepon = VALUES(telepon),
+       divisi = VALUES(divisi)`,
+      [id, nama_lengkap, telepon, divisi]
+    );
+
+    res.json({ message: 'Pembimbing updated successfully' });
+  } catch (error) {
+    handleError(res, error, 'Error updating pembimbing');
   }
 });
 
