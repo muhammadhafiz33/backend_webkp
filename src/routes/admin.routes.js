@@ -34,6 +34,7 @@ router.get('/users', async (req, res) => {
         u.id, 
         u.identifier AS nim, 
         u.email,
+        u.is_active,
         COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama_lengkap,
         p.telepon, 
         p.jurusan, 
@@ -131,6 +132,31 @@ router.post('/users', async (req, res) => {
   }
 });
 
+// Perbaikan: Tambahkan rute PATCH untuk memperbarui status aktif pengguna
+router.patch('/users/:nim/status', async (req, res) => {
+  try {
+    const { nim } = req.params;
+    const { is_active } = req.body;
+
+    if (typeof is_active !== 'boolean') {
+      return res.status(400).json({ message: 'Status must be a boolean value' });
+    }
+
+    const [result] = await pool.query(
+      'UPDATE users SET is_active = ? WHERE identifier = ? AND role = ?',
+      [is_active, nim, 'MAHASISWA']
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+
+    res.json({ message: 'User status updated successfully' });
+  } catch (error) {
+    handleError(res, error, 'Error updating user status');
+  }
+});
+
 // Delete MAHASISWA user
 router.delete('/users/:nim', async (req, res) => {
   try {
@@ -152,6 +178,28 @@ router.delete('/users/:nim', async (req, res) => {
 });
 
 /** === PEMBIMBING MANAGEMENT === */
+
+// GET /api/admin/pembimbing/summary -> Dapatkan daftar pembimbing dengan statistik ringkas
+router.get('/pembimbing/summary', async (req, res) => {
+  try {
+    const query = `
+      SELECT 
+        u.id, u.identifier, u.email,
+        COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama_lengkap,
+        (SELECT COUNT(*) FROM user_profiles up WHERE up.pembimbing_lapangan = COALESCE(p.nama_lengkap, u.nama_lengkap)) AS totalMahasiswa,
+        (SELECT COUNT(j.id) FROM jurnals j JOIN user_profiles up ON j.user_id = up.user_id WHERE up.pembimbing_lapangan = COALESCE(p.nama_lengkap, u.nama_lengkap) AND j.status = 'PENDING') AS jurnalPending,
+        (SELECT COUNT(j.id) FROM jurnals j JOIN user_profiles up ON j.user_id = up.user_id WHERE up.pembimbing_lapangan = COALESCE(p.nama_lengkap, u.nama_lengkap) AND j.status = 'APPROVED') AS jurnalApproved
+      FROM users u
+      LEFT JOIN user_profiles p ON u.id = p.user_id
+      WHERE u.role = 'PEMBIMBING'
+      ORDER BY u.id DESC
+    `;
+    const [rows] = await pool.query(query);
+    res.json(rows);
+  } catch (error) {
+    handleError(res, error, 'Error fetching pembimbing summary');
+  }
+});
 
 // GET /api/admin/pembimbing -> Get all PEMBIMBING users
 router.get('/pembimbing', async (req, res) => {
@@ -388,7 +436,7 @@ router.get('/absensi', async (req, res) => {
 
     const query = `
       SELECT 
-        a.*, 
+        a.id, a.tanggal, a.waktu_masuk, a.waktu_keluar, a.status,
         u.identifier AS nim, 
         COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama_lengkap
       FROM absensi a
@@ -453,11 +501,6 @@ router.get('/absensi/export', async (req, res) => {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename=laporan-absensi-${tanggal}.pdf`);
     doc.pipe(res);
-
-    // PDF Header
-    doc.fontSize(16)
-       .text(`Attendance Report - ${formattedDate}`, { align: 'center' })
-       .moveDown();
 
     // Table configuration
     const headers = ['NIM', 'Name', 'Date', 'Check In', 'Check Out', 'Status'];
@@ -560,40 +603,42 @@ router.get('/izin/export/pdf', async (req, res) => {
             doc.text(header, columnPositions[i], tableTop);
         });
         
-        doc.moveTo(30, tableTop + 15).lineTo(565, tableTop + 15).stroke();
-        
-        doc.font('Helvetica');
+        doc.moveTo(30, tableTop + 15)
+       .lineTo(565, tableTop + 15)
+       .stroke();
+    
+    doc.font('Helvetica');
 
-        let y = tableTop + 20;
-        for (const row of rows) {
-            const cells = [
-                row.nim || '-',
-                row.nama || '-',
-                row.tanggal_izin || '-', 
-                row.alasan || '-',
-                row.status || '-'
-            ];
+    let y = tableTop + 20;
+    for (const row of rows) {
+      const cells = [
+        row.nim || '-',
+        row.nama || '-',
+        row.tanggal_izin || '-', 
+        row.alasan || '-',
+        row.status || '-'
+      ];
 
-            cells.forEach((cell, i) => {
-                doc.text(cell, columnPositions[i], y, { width: columnWidths[i] });
-            });
+      cells.forEach((cell, i) => {
+        doc.text(cell, columnPositions[i], y, { width: columnWidths[i] });
+      });
 
-            const rowHeight = Math.max(
-                doc.heightOfString(row.alasan || '-', { width: columnWidths[3] }), 
-                20
-            );
-            y += rowHeight + 10;
+      const rowHeight = Math.max(
+        doc.heightOfString(row.alasan || '-', { width: columnWidths[3] }), 
+        20
+      );
+      y += rowHeight + 10;
 
-            if (y > 750) {
-                doc.addPage();
-                y = tableTop;
-            }
-        }
-
-        doc.end();
-    } catch (error) {
-        handleError(res, error, 'Error generating leave PDF report');
+      if (y > 750) {
+        doc.addPage();
+        y = tableTop;
+      }
     }
+
+    doc.end();
+  } catch (error) {
+    handleError(res, error, 'Error generating leave PDF report');
+  }
 });
 
 
@@ -618,6 +663,98 @@ router.get('/pembimbing/summary', async (req, res) => {
     res.json(rows);
   } catch (error) {
     handleError(res, error, 'Error fetching pembimbing summary');
+  }
+});
+
+// GET /api/admin/pembimbing -> Get all PEMBIMBING users
+router.get('/pembimbing', async (req, res) => {
+  try {
+    const query = `
+      SELECT 
+        u.id, 
+        u.identifier, 
+        u.email,
+        COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama_lengkap,
+        p.telepon, 
+        p.divisi
+      FROM users u
+      LEFT JOIN user_profiles p ON u.id = p.user_id
+      WHERE u.role = 'PEMBIMBING'
+      ORDER BY u.id DESC
+    `;
+    
+    const [rows] = await pool.query(query);
+    res.json(rows);
+  } catch (error) {
+    handleError(res, error, 'Error fetching pembimbing');
+  }
+});
+
+// POST /api/admin/pembimbing -> Create a new PEMBIMBING user
+router.post('/pembimbing', async (req, res) => {
+  try {
+    const { identifier, email, password, nama_lengkap, telepon, divisi } = req.body || {};
+    
+    // Validation
+    const validationError = validateRequiredFields(['identifier', 'password', 'nama_lengkap'], req.body);
+    if (validationError) {
+      return res.status(400).json({ message: validationError });
+    }
+
+    // Check if user already exists
+    const [existingUser] = await pool.query(
+      'SELECT id FROM users WHERE identifier = ? OR (email IS NOT NULL AND email = ?)',
+      [identifier, email]
+    );
+    
+    if (existingUser.length) {
+      return res.status(409).json({ message: 'Identifier or email already exists' });
+    }
+
+    // Create user
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const [result] = await pool.query(
+      'INSERT INTO users (identifier, email, password_hash, role, nama_lengkap) VALUES (?, ?, ?, ?, ?)',
+      [identifier, email, hashedPassword, 'PEMBIMBING', nama_lengkap]
+    );
+    const newUserId = result.insertId;
+
+    // Create a profile for the new user
+    await pool.query(
+        'INSERT INTO user_profiles (user_id, nama_lengkap, telepon, divisi) VALUES (?, ?, ?, ?)',
+        [newUserId, nama_lengkap, telepon, divisi]
+    );
+
+    res.status(201).json({ message: 'Pembimbing created successfully' });
+  } catch (error) {
+    handleError(res, error, 'Error creating pembimbing');
+  }
+});
+
+// DELETE /api/admin/pembimbing/:id -> Delete a PEMBIMBING user
+router.delete('/pembimbing/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // First, check if the user exists and has the 'PEMBIMBING' role
+    const [user] = await pool.query('SELECT id FROM users WHERE id = ? AND role = ?', [id, 'PEMBIMBING']);
+    if (user.length === 0) {
+      return res.status(404).json({ message: 'Pembimbing not found' });
+    }
+    
+    // Delete from users table (this will cascade delete from user_profiles if foreign key is set up)
+    const [result] = await pool.query(
+      'DELETE FROM users WHERE id = ?',
+      [id]
+    );
+
+    if (!result.affectedRows) {
+      return res.status(404).json({ message: 'Pembimbing not found or cannot be deleted' });
+    }
+
+    res.json({ message: 'Pembimbing deleted successfully' });
+  } catch (error) {
+    handleError(res, error, 'Error deleting pembimbing');
   }
 });
 

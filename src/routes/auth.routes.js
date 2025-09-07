@@ -62,12 +62,18 @@ router.post("/login", async (req, res) => {
     const { identifier, password } = req.body || {};
     if (!validateFields({ identifier, password }, res)) return;
 
+    // Perbaikan: Ambil juga kolom 'is_active' dari database
     const [rows] = await pool.query(
-      "SELECT * FROM users WHERE identifier = ?",
+      "SELECT id, identifier, password_hash, role, nama_lengkap, email, is_active FROM users WHERE identifier = ?",
       [identifier]
     );
     const user = rows[0];
     if (!user) return res.status(401).json({ message: "Akun tidak ditemukan" });
+
+    // Perbaikan: Tambahkan pengecekan status 'is_active'
+    if (!user.is_active) {
+      return res.status(403).json({ message: "Akun Anda telah dinonaktifkan. Silakan hubungi administrator." });
+    }
 
     const match = await bcrypt.compare(password, user.password_hash);
     if (!match) return res.status(401).json({ message: "Password salah" });

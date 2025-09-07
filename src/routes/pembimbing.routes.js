@@ -27,9 +27,21 @@ router.get('/mahasiswa', async (req, res) => {
         
         const namaPembimbing = pembimbingInfo[0].nama_lengkap || pembimbingInfo[0].identifier;
         
+        // Perbaikan: Menambahkan lebih banyak kolom dari tabel user_profiles
         const query = `
             SELECT 
-                u.id, u.identifier AS nim, COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama_lengkap, p.jurusan, u.email, p.telepon, p.divisi
+                u.id, 
+                u.identifier AS nim, 
+                COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama_lengkap, 
+                p.jurusan, 
+                u.email, 
+                p.telepon, 
+                p.divisi,
+                p.universitas,
+                p.angkatan,
+                p.pembimbing_lapangan,
+                p.tanggal_mulai_kp,
+                p.tanggal_selesai_kp
             FROM user_profiles p
             JOIN users u ON p.user_id = u.id
             WHERE p.pembimbing_lapangan = ?
