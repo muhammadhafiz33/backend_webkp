@@ -93,6 +93,60 @@ router.get('/jurnals', async (req, res) => {
 });
 
 /**
+ * Endpoint BARU untuk memperbarui status jurnal oleh pembimbing.
+ */
+router.patch('/jurnals/:jurnalId/status', async (req, res) => {
+    try {
+        const { jurnalId } = req.params;
+        const { status, komentar_admin } = req.body;
+        const pembimbingUserId = req.user.id;
+
+        // Validasi status
+        const validStatuses = ['APPROVED', 'REJECTED'];
+        if (!validStatuses.includes(status.toUpperCase())) {
+            return res.status(400).json({ message: 'Invalid status provided.' });
+        }
+
+        // Dapatkan nama pembimbing
+        const [pembimbingInfo] = await pool.query(
+            `SELECT COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama_lengkap 
+             FROM users u LEFT JOIN user_profiles p ON u.id = p.user_id 
+             WHERE u.id = ?`,
+            [pembimbingUserId]
+        );
+        if (!pembimbingInfo.length) {
+            return res.status(404).json({ message: 'Pembimbing not found.' });
+        }
+        const namaPembimbing = pembimbingInfo[0].nama_lengkap;
+
+        // Verifikasi bahwa jurnal ini milik salah satu mahasiswa bimbingan dari pembimbing ini
+        const [jurnal] = await pool.query(
+            `SELECT j.id FROM jurnals j
+             JOIN user_profiles up ON j.user_id = up.user_id
+             WHERE j.id = ? AND up.pembimbing_lapangan = ?`,
+            [jurnalId, namaPembimbing]
+        );
+
+        if (jurnal.length === 0) {
+            return res.status(403).json({ message: 'Forbidden: You are not authorized to update this journal.' });
+        }
+
+        // Update jurnal
+        await pool.query(
+            'UPDATE jurnals SET status = ?, komentar_admin = ? WHERE id = ?',
+            [status.toUpperCase(), komentar_admin || null, jurnalId]
+        );
+
+        res.json({ message: 'Journal status updated successfully.' });
+
+    } catch (error) {
+        console.error('Error updating journal status by pembimbing:', error);
+        res.status(500).json({ message: 'Internal Server Error' });
+    }
+});
+
+
+/**
  * Endpoint untuk mendapatkan absensi mahasiswa bimbingan.
  */
 router.get('/absensi', async (req, res) => {
@@ -273,7 +327,7 @@ router.get('/jurnals/export/pdf', async (req, res) => {
         const [rows] = await pool.query(query, [namaPembimbing]);
 
         if (!rows.length) {
-            const doc = new PDFDocument({ margin: 30, size: 'A4' });
+            const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape' });
             res.setHeader('Content-Type', 'application/pdf');
             res.setHeader('Content-Disposition', `attachment; filename=laporan-jurnal-bimbingan.pdf`);
             doc.pipe(res);
@@ -283,33 +337,55 @@ router.get('/jurnals/export/pdf', async (req, res) => {
             return;
         }
 
-        const doc = new PDFDocument({ margin: 30, size: 'A4' });
+        const doc = new PDFDocument({ margin: 50, layout: 'landscape', size: 'A4' });
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename=laporan-jurnal-bimbingan.pdf`);
         doc.pipe(res);
         
-        doc.fontSize(16).text('Laporan Jurnal Mahasiswa Bimbingan', { align: 'center' }).moveDown();
-        doc.fontSize(12).text(`Pembimbing: ${namaPembimbing}`).moveDown();
-        
-        rows.forEach((jurnal) => {
+        rows.forEach((jurnal, index) => {
             const formattedDate = new Date(jurnal.tanggal).toLocaleDateString('id-ID', { dateStyle: 'full' });
             
-            doc.fontSize(12).font('Helvetica-Bold').text(`Jurnal Tanggal: ${formattedDate}`, { underline: true }).moveDown(0.5);
-            doc.font('Helvetica-Bold').text('Mahasiswa:', { continued: true }).font('Helvetica').text(` ${jurnal.nama} (${jurnal.nim})`);
-            doc.font('Helvetica-Bold').text('Status:', { continued: true }).font('Helvetica').text(` ${jurnal.status}`);
-            doc.font('Helvetica-Bold').text('Kegiatan:').font('Helvetica').text(jurnal.kegiatan);
-            doc.font('Helvetica-Bold').text('Deskripsi:').font('Helvetica').text(jurnal.deskripsi);
-            if (jurnal.hambatan) {
-                doc.font('Helvetica-Bold').text('Hambatan:').font('Helvetica').text(jurnal.hambatan);
-            }
-            if (jurnal.komentar_admin) {
-                doc.font('Helvetica-Bold').text('Komentar Pembimbing:').font('Helvetica').text(jurnal.komentar_admin);
-            }
-            doc.moveDown();
+            // Header
+            doc.fontSize(12).font('Helvetica-Bold').text('Nama Pembimbing:', 50, 50).font('Helvetica').text(namaPembimbing, 160, 50);
             
-            // Tambahkan halaman baru jika konten terlalu panjang
-            if (doc.y > 700) {
-                doc.addPage();
+            doc.font('Helvetica-Bold').text('Nama Mahasiswa:', 500, 50).font('Helvetica').text(`${jurnal.nama} (${jurnal.nim})`, 610, 50);
+            doc.font('Helvetica-Bold').text('Tanggal:', 500, 65).font('Helvetica').text(formattedDate, 610, 65);
+
+            doc.moveDown(4);
+
+            // Body
+            const bodyY = doc.y;
+            const contentX = 50;
+            const labelWidth = 80;
+            const valueX = contentX + labelWidth;
+            
+            doc.font('Helvetica-Bold').text('Kegiatan:', contentX, bodyY, { width: labelWidth });
+            doc.font('Helvetica').text(jurnal.kegiatan || '-', valueX, bodyY, { width: 600 });
+            doc.moveDown(1);
+            doc.font('Helvetica-Bold').text('Deskripsi:', contentX, doc.y, { width: labelWidth });
+            doc.font('Helvetica').text(jurnal.deskripsi || '-', valueX, doc.y, { width: 600 });
+            doc.moveDown(1);
+            doc.font('Helvetica-Bold').text('Hambatan:', contentX, doc.y, { width: labelWidth });
+            doc.font('Helvetica').text(jurnal.hambatan || '-', valueX, doc.y, { width: 600 });
+            doc.moveDown(1);
+            doc.font('Helvetica-Bold').text('Rencana:', contentX, doc.y, { width: labelWidth });
+            doc.font('Helvetica').text(jurnal.rencana_selanjutnya || '-', valueX, doc.y, { width: 600 });
+           
+            // Status di kanan bawah
+            const statusY = doc.page.height - 70;
+            doc.font('Helvetica-Bold').text('Status:', 650, statusY);
+            doc.save();
+            if (jurnal.status === 'APPROVED') {
+                // Gambar ikon centang
+                doc.moveTo(700, statusY + 5).lineTo(705, statusY + 10).lineTo(715, statusY).lineWidth(2).stroke('green');
+            } else {
+                doc.font('Helvetica').fillColor('black').text(jurnal.status, 700, statusY);
+            }
+            doc.restore();
+            
+            // Tambahkan halaman baru jika bukan jurnal terakhir
+            if (index < rows.length - 1) {
+                doc.addPage({ margin: 50, layout: 'landscape', size: 'A4' });
             }
         });
 
@@ -410,4 +486,93 @@ router.get('/izin/export/pdf', async (req, res) => {
     }
 });
 
+// Endpoint untuk mengunduh jurnal tunggal sebagai PDF
+router.get('/jurnals/:jurnalId/export/pdf', async (req, res) => {
+    try {
+        const { jurnalId } = req.params;
+        const userId = req.user.id;
+        
+        const [pembimbingInfo] = await pool.query(
+            `SELECT COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama_lengkap 
+             FROM users u LEFT JOIN user_profiles p ON u.id = p.user_id 
+             WHERE u.id = ?`, [userId]
+        );
+
+        if (!pembimbingInfo.length) {
+            return res.status(404).json({ message: 'Pembimbing not found' });
+        }
+        const namaPembimbing = pembimbingInfo[0].nama_lengkap;
+        
+        const query = `
+            SELECT 
+                j.id, u.identifier AS nim, 
+                COALESCE(p.nama_lengkap, u.nama_lengkap) AS nama,
+                j.tanggal, j.kegiatan, j.deskripsi, j.status,
+                p.pembimbing_lapangan
+            FROM jurnals j
+            JOIN users u ON j.user_id = u.id
+            LEFT JOIN user_profiles p ON u.id = p.user_id
+            WHERE j.id = ? AND p.pembimbing_lapangan = ?
+        `;
+        
+        const [rows] = await pool.query(query, [jurnalId, namaPembimbing]);
+
+        if (!rows.length) {
+            return res.status(404).json({ message: 'Jurnal tidak ditemukan atau Anda tidak berwenang mengaksesnya' });
+        }
+        
+        const jurnal = rows[0];
+        const doc = new PDFDocument({ margin: 50, layout: 'landscape', size: 'A4' });
+
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename=jurnal-${jurnal.nim}-${new Date(jurnal.tanggal).toISOString().split('T')[0]}.pdf`);
+        doc.pipe(res);
+        
+        // Header
+        doc.fontSize(12).font('Helvetica-Bold').text('Nama Pembimbing:', 50, 50).font('Helvetica').text(namaPembimbing, 160, 50);
+        
+        doc.font('Helvetica-Bold').text('Nama Mahasiswa:', 500, 50).font('Helvetica').text(`${jurnal.nama} (${jurnal.nim})`, 610, 50);
+        doc.font('Helvetica-Bold').text('Tanggal:', 500, 65).font('Helvetica').text(new Date(jurnal.tanggal).toLocaleDateString('id-ID', { dateStyle: 'full' }), 610, 65);
+
+        doc.moveDown(4);
+
+        // Body
+        const bodyY = doc.y;
+        const contentX = 50;
+        const labelWidth = 80;
+        const valueX = contentX + labelWidth;
+        
+        doc.font('Helvetica-Bold').text('Kegiatan:', contentX, bodyY, { width: labelWidth });
+        doc.font('Helvetica').text(jurnal.kegiatan || '-', valueX, bodyY, { width: 600 });
+        doc.moveDown(1);
+        doc.font('Helvetica-Bold').text('Deskripsi:', contentX, doc.y, { width: labelWidth });
+        doc.font('Helvetica').text(jurnal.deskripsi || '-', valueX, doc.y, { width: 600 });
+        doc.moveDown(1);
+        doc.font('Helvetica-Bold').text('Hambatan:', contentX, doc.y, { width: labelWidth });
+        doc.font('Helvetica').text(jurnal.hambatan || '-', valueX, doc.y, { width: 600 });
+        doc.moveDown(1);
+        doc.font('Helvetica-Bold').text('Rencana:', contentX, doc.y, { width: labelWidth });
+        doc.font('Helvetica').text(jurnal.rencana_selanjutnya || '-', valueX, doc.y, { width: 600 });
+       
+        // Status di kanan bawah
+        const statusY = doc.page.height - 70;
+        doc.font('Helvetica-Bold').text('Status:', 650, statusY);
+        doc.save();
+        if (jurnal.status === 'APPROVED') {
+            // Gambar ikon centang
+            doc.moveTo(700, statusY + 5).lineTo(705, statusY + 10).lineTo(715, statusY).lineWidth(2).stroke('green');
+        } else {
+            doc.font('Helvetica').fillColor('black').text(jurnal.status, 700, statusY);
+        }
+        doc.restore();
+        
+        doc.end();
+
+    } catch (error) {
+        console.error('Error exporting single journal:', error);
+        res.status(500).json({ message: 'Gagal mengekspor jurnal' });
+    }
+});
+
 module.exports = router;
+
